@@ -1,0 +1,30 @@
+{
+    "name": "Jīvaka - 8bit Ayurveda",
+    "short_name": "Jīvaka",
+    "description": "古代インドの名医にちなんだ薬草調合データベース",
+    "start_url": "./index.html",
+    "display": "standalone",
+    "orientation": "any",
+    "background_color": "#1a0b2e",
+    "theme_color": "#5e2563",
+    "lang": "ja",
+    "icons": [
+        {
+            "src": "icons/icon-192.png",
+            "sizes": "192x192",
+            "type": "image/png"
+        },
+        {
+            "src": "icons/icon-512.png",
+            "sizes": "512x512",
+            "type": "image/png"
+        },
+        {
+            "src": "icons/icon-maskable-512.png",
+            "sizes": "512x512",
+            "type": "image/png",
+            "purpose": "maskable"
+        }
+    ],
+    "categories": ["health", "education", "lifestyle"]
+}
