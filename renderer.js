@@ -119,6 +119,56 @@ const callAI = async ({ prompt, aiProvider, apiKey, geminiApiKey, maxTokens = 20
   return JSON.parse(jsonText);
 };
 
+/**
+ * 画像ファイルを圧縮してDataURL(base64)として返す
+ * - Firestoreの1ドキュメント=1MB制限に収めるため、薬草画像は圧縮してから保存する
+ * - 縦横いずれかが maxDimension を超える場合は縮小
+ * - JPEGとして再エンコード (透過PNGでも透過は失われる点に注意)
+ *
+ * @param {File} file         元画像ファイル
+ * @param {number} maxDimension 長辺の最大ピクセル数 (デフォルト1280)
+ * @param {number} quality    JPEG品質 0.0 - 1.0 (デフォルト0.75)
+ * @returns {Promise<string>} 圧縮後のDataURL
+ */
+function compressImageFile(file, maxDimension = 1280, quality = 0.75) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const img = new Image();
+      img.onload = () => {
+        let { width, height } = img;
+        // 長辺が maxDimension を超えていれば縮小 (アスペクト比維持)
+        const scale = Math.min(maxDimension / width, maxDimension / height, 1);
+        width = Math.round(width * scale);
+        height = Math.round(height * scale);
+
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        // JPEG化で背景が黒くならないよう、白で塗りつぶしてから描画
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, width, height);
+        ctx.drawImage(img, 0, 0, width, height);
+
+        try {
+          const dataUrl = canvas.toDataURL('image/jpeg', quality);
+          const originalKB = Math.round(file.size / 1024);
+          const compressedKB = Math.round(dataUrl.length * 0.75 / 1024); // base64→概算バイト数
+          console.log(`📦 画像を圧縮: ${originalKB}KB → 約${compressedKB}KB (${width}×${height})`);
+          resolve(dataUrl);
+        } catch (err) {
+          reject(err);
+        }
+      };
+      img.onerror = () => reject(new Error('画像の読み込みに失敗しました'));
+      img.src = e.target.result;
+    };
+    reader.onerror = () => reject(new Error('ファイルの読み込みに失敗しました'));
+    reader.readAsDataURL(file);
+  });
+}
+
 const INITIAL_HERBS = [
   {
     id: '1', name: 'カモミール', scientificName: 'Matricaria chamomilla',
@@ -5842,11 +5892,21 @@ const HerbModal = ({ herb, apiKey, geminiApiKey, aiProvider, standardEffects, on
                       onChange={(e) => {
                         const file = e.target.files?.[0];
                         if (file) {
-                          const reader = new FileReader();
-                          reader.onloadend = () => {
-                            setFormData({ ...formData, image: reader.result });
-                          };
-                          reader.readAsDataURL(file);
+                          // 画像を圧縮して保存 (最大1280px、JPEG品質0.75)
+                          // これによりFirestore 1MBドキュメント制限に収まるようにする
+                          compressImageFile(file, 1280, 0.75)
+                            .then(compressed => {
+                              setFormData({ ...formData, image: compressed });
+                            })
+                            .catch(err => {
+                              console.error('画像圧縮エラー:', err);
+                              // 圧縮に失敗したらフォールバックで従来通り読み込む
+                              const reader = new FileReader();
+                              reader.onloadend = () => {
+                                setFormData({ ...formData, image: reader.result });
+                              };
+                              reader.readAsDataURL(file);
+                            });
                         }
                       }}
                       className="hidden"
