@@ -244,7 +244,25 @@
         // ネットワークエラーをthrowする（nullを返すと「データ無し」と区別できず
         // 本来クラウドにある新しいデータをローカルで上書きしてしまうため）
         const doc = await ref.get();
-        return doc.exists ? doc.data() : null;
+        if (!doc.exists) return null;
+        const data = doc.data();
+
+        // herbs の場合は images サブコレクションから画像をマージして返す
+        if (shouldSplitImages(key) && Array.isArray(data.value)) {
+            try {
+                const imagesSnap = await ref.collection('images').get();
+                const imageMap = {};
+                imagesSnap.forEach(d => {
+                    const img = d.data();
+                    if (img && img.image) imageMap[d.id] = img.image;
+                });
+                return { ...data, value: mergeHerbImages(data.value, imageMap) };
+            } catch (e) {
+                console.warn('[Cloud] Failed to fetch herb images:', e);
+                return data; // メインだけでも返す (旧フォーマット互換)
+            }
+        }
+        return data;
     }
 
     async function cloudSet(key, value) {
@@ -257,12 +275,61 @@
         try {
             updateSyncUI('syncing');
             const now = Date.now();
-            await ref.set({
-                value: JSON.parse(JSON.stringify(value)),  // deep clone for Firestore
-                updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
-                updatedAtMs: now,
-                deviceId: getDeviceId()
-            }, { merge: false });
+
+            if (shouldSplitImages(key) && Array.isArray(value)) {
+                // 画像を別ドキュメントに分離して保存
+                //   本体: users/{uid}/data/herbs                → 画像以外
+                //   画像: users/{uid}/data/herbs/images/{herbId} → 1画像1ドキュメント
+                // Firestoreの1MB/ドキュメント制限を各画像が独立して持てる
+                const { strippedHerbs, images } = stripHerbImages(value);
+
+                // 1. 本体ドキュメント
+                await ref.set({
+                    value: JSON.parse(JSON.stringify(strippedHerbs)),
+                    updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
+                    updatedAtMs: now,
+                    deviceId: getDeviceId()
+                }, { merge: false });
+
+                // 2. 各画像を個別ドキュメントへ
+                const imagesCol = ref.collection('images');
+                const imagePromises = [];
+                for (const [herbId, imageData] of Object.entries(images)) {
+                    imagePromises.push(
+                        imagesCol.doc(herbId).set({
+                            image: imageData,
+                            updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
+                            updatedAtMs: now,
+                            deviceId: getDeviceId()
+                        })
+                    );
+                }
+
+                // 3. 現在の herb.id に含まれない画像ドキュメント (削除済み) を掃除
+                try {
+                    const existingImagesSnap = await imagesCol.get();
+                    const currentHerbIds = new Set(value.map(h => h.id));
+                    existingImagesSnap.forEach(doc => {
+                        if (!currentHerbIds.has(doc.id)) {
+                            imagePromises.push(doc.ref.delete());
+                        }
+                    });
+                } catch (e) {
+                    console.warn('[Cloud] Orphan image cleanup failed (safe to ignore):', e);
+                }
+
+                await Promise.all(imagePromises);
+                console.log(`[Cloud] set(herbs): main doc + ${Object.keys(images).length} images`);
+            } else {
+                // 従来通り: 1ドキュメントにまとめて保存
+                await ref.set({
+                    value: JSON.parse(JSON.stringify(value)),  // deep clone for Firestore
+                    updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
+                    updatedAtMs: now,
+                    deviceId: getDeviceId()
+                }, { merge: false });
+            }
+
             syncState.pendingWrites.delete(key);
             syncState.lastSyncTime = now;
             // ローカルのタイムスタンプも更新
@@ -278,6 +345,44 @@
                 updateSyncUI('error');
             }
         }
+    }
+
+    // =====================================================
+    // 画像分離ヘルパー
+    // (Firestoreの1MB/ドキュメント制限を回避するため、
+    //  base64画像は 'herbs' 本体から別サブコレクションに分離する)
+    // =====================================================
+
+    /** このキーのデータは画像分離保存の対象か */
+    function shouldSplitImages(key) {
+        return key === 'herbs';
+    }
+
+    /**
+     * herbs 配列から image フィールドを剥がす
+     * @param {Array} herbs
+     * @returns {{strippedHerbs: Array, images: Object<string,string>}}
+     */
+    function stripHerbImages(herbs) {
+        const images = {};
+        const strippedHerbs = herbs.map(h => {
+            if (h && h.image && typeof h.image === 'string' && h.image.length > 0) {
+                images[h.id] = h.image;
+                return { ...h, image: null };
+            }
+            return { ...h };
+        });
+        return { strippedHerbs, images };
+    }
+
+    /**
+     * 画像なしの herbs 配列と画像マップを結合して画像付き herbs 配列を返す
+     */
+    function mergeHerbImages(strippedHerbs, imageMap) {
+        return (strippedHerbs || []).map(h => ({
+            ...h,
+            image: (imageMap && imageMap[h.id]) || h.image || null
+        }));
     }
 
     // デバイス識別子（自分の変更を無視するため）
@@ -415,7 +520,7 @@
             const ref = getUserDocRef(key);
             if (!ref) continue;
 
-            const unsubscribe = ref.onSnapshot((doc) => {
+            const unsubscribe = ref.onSnapshot(async (doc) => {
                 if (!doc.exists) return;
                 const data = doc.data();
                 
@@ -434,8 +539,24 @@
                     }, 500);
                 }
 
+                // herbs の場合は images サブコレクションから画像を取得してマージ
+                let value = data.value;
+                if (shouldSplitImages(key) && Array.isArray(value)) {
+                    try {
+                        const imagesSnap = await ref.collection('images').get();
+                        const imageMap = {};
+                        imagesSnap.forEach(d => {
+                            const img = d.data();
+                            if (img && img.image) imageMap[d.id] = img.image;
+                        });
+                        value = mergeHerbImages(value, imageMap);
+                    } catch (e) {
+                        console.warn('[Sync] Failed to fetch images in listener:', e);
+                    }
+                }
+
                 const cloudTs = data.updatedAtMs || (data.updatedAt ? data.updatedAt.toMillis() : Date.now());
-                localSet(key, data.value).then(() => {
+                localSet(key, value).then(() => {
                     localSet('_ts_' + key, { ts: cloudTs });
                     // UIリフレッシュイベントを発火
                     window.dispatchEvent(new CustomEvent('jivaka-sync', { 
