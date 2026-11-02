@@ -3,7 +3,7 @@
  * オフラインキャッシュとバックグラウンド同期
  */
 
-const CACHE_NAME = 'jivaka-v3';
+const CACHE_NAME = 'jivaka-v4';
 const ASSETS_TO_CACHE = [
     './',
     './index.html',
@@ -31,7 +31,8 @@ self.addEventListener('install', (event) => {
     event.waitUntil(
         caches.open(CACHE_NAME).then((cache) => {
             // ローカルアセットを必ずキャッシュ
-            return cache.addAll(ASSETS_TO_CACHE).then(() => {
+            // (cache: 'reload' でブラウザのHTTPキャッシュを経由せず、更新後の最新ファイルを取得する)
+            return cache.addAll(ASSETS_TO_CACHE.map(url => new Request(url, { cache: 'reload' }))).then(() => {
                 // CDNアセットは可能な限りキャッシュ（失敗してもインストールは継続）
                 return Promise.allSettled(
                     CDN_ASSETS.map(url => cache.add(url).catch(err => {

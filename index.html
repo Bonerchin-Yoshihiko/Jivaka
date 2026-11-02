@@ -315,37 +315,69 @@
         }
         @keyframes coin-shine { 0%, 100% { opacity: 1; } 50% { opacity: 0.8; } }
 
+        /* モーダル背景: 親の space-y-* が付ける margin-top で上端がずれ、
+           ヘッダーがモーダルの上に見えてしまう（押せてしまう）のを防ぐ */
+        .fixed.inset-0 {
+            margin: 0 !important;
+        }
+        /* モーダル内の固定見出し（✕ボタン付き）を、スクロールした中身より手前に表示する */
+        .fixed.inset-0 .sticky.top-0 {
+            z-index: 10;
+        }
+
         /* =========================================
            📱 MOBILE RESPONSIVE STYLES
            ========================================= */
 
         /* --- スマートフォン (〜767px) --- */
         @media (max-width: 767px) {
-            /* ヘッダーをコンパクトに */
+            /* 横方向のはみ出しをページ全体のスクロールにしない
+               (clip はスクロールコンテナを作らないので sticky を壊さない) */
+            #root {
+                overflow-x: clip;
+            }
+
+            /* ===== ヘッダー: 1行に収まるようコンパクト化（入りきらない端末では2行に折り返し） ===== */
             header .max-w-7xl {
                 padding: 8px 12px !important;
             }
-            
-            /* タイトル縮小 */
-            header h1 {
-                font-size: 1.5rem !important;
+            header .max-w-7xl > .flex {
+                flex-wrap: wrap;
+                row-gap: 6px;
+                column-gap: 8px;
+            }
+            header .flex.items-center.space-x-4 > * + * {
+                margin-left: 6px !important;
             }
             header .text-6xl {
-                font-size: 2rem !important;
+                font-size: 1.6rem !important;
+                line-height: 1 !important;
+            }
+            header h1 {
+                font-size: 1.35rem !important;
+                line-height: 1.2 !important;
+                letter-spacing: 1px;
             }
             header p {
-                font-size: 0.6rem !important;
                 display: none;
             }
-            
+
             /* ヘッダーボタン: アイコンのみ表示 */
             header .flex.items-center.space-x-3 {
-                gap: 4px !important;
+                margin-left: auto;
+                gap: 4px;
+                flex-wrap: wrap;
+                justify-content: flex-end;
+            }
+            header .flex.items-center.space-x-3 > * {
+                margin: 0 !important;
             }
             header .flex.items-center.space-x-3 > button {
-                padding: 8px !important;
-                min-width: 40px;
-                min-height: 40px;
+                padding: 0 !important;
+                width: 36px;
+                height: 36px;
+                min-height: 36px;
+                border-width: 3px;
                 display: flex;
                 align-items: center;
                 justify-content: center;
@@ -354,47 +386,86 @@
                 display: none !important;
             }
             header .flex.items-center.space-x-3 > button > span.text-2xl {
-                font-size: 1.2rem !important;
+                font-size: 1.1rem !important;
             }
-            
-            /* タブナビゲーション: 横スクロール対応 */
-            nav .flex.space-x-2 {
-                overflow-x: auto;
-                -webkit-overflow-scrolling: touch;
-                scrollbar-width: none;
-                gap: 2px !important;
-                padding-bottom: 4px;
+
+            /* ヘッダーは一緒にスクロールさせ、タブだけ画面上部に固定する
+               (ヘッダー＋タブ両方を固定すると画面の1/4以上が埋まり、重なりも起きるため) */
+            header.sticky {
+                position: relative !important;
             }
-            nav .flex.space-x-2::-webkit-scrollbar {
-                display: none;
-            }
-            
-            /* タブのstickyオフセット調整 */
             nav.sticky {
-                top: 56px !important;
+                position: -webkit-sticky !important;
+                position: sticky !important;
+                top: 0 !important;
             }
-            
-            /* タブボタンを小さく */
+
+            /* ===== タブ: 4つとも画面内に収める（アイコン上・ラベル下） ===== */
+            nav .max-w-7xl {
+                padding: 6px 4px 0 !important;
+            }
+            nav .flex.space-x-2 {
+                gap: 4px;
+            }
+            nav .flex.space-x-2 > * {
+                margin: 0 !important;
+            }
             .tab-button {
-                padding: 8px 10px !important;
-                font-size: 0.7rem !important;
+                flex: 1 1 auto;
+                min-width: 0;
+                flex-direction: column;
+                justify-content: center;
+                gap: 2px;
+                padding: 6px 4px !important;
+                border-width: 3px;
                 white-space: nowrap;
-                flex-shrink: 0;
             }
-            .tab-button .space-x-2 {
-                gap: 2px !important;
+            .tab-button > * {
+                margin: 0 !important;
             }
             .tab-button svg {
-                width: 14px !important;
-                height: 14px !important;
+                width: 16px !important;
+                height: 16px !important;
+                flex-shrink: 0;
             }
             .tab-button span {
-                font-size: 0.65rem !important;
+                font-size: 0.68rem !important;
+                max-width: 100%;
+                overflow: hidden;
+                text-overflow: ellipsis;
             }
-            
-            /* メインコンテンツ */
+
+            /* メインコンテンツ（下部は同期バッジに隠れないよう余白を確保） */
             main.max-w-7xl {
-                padding: 8px !important;
+                padding: 8px 8px calc(72px + env(safe-area-inset-bottom)) !important;
+            }
+
+            /* ===== はみ出し防止（汎用） ===== */
+            /* 長い英単語・URL を折り返す */
+            main, .fixed.inset-0 {
+                overflow-wrap: anywhere;
+            }
+            /* フレックス内の入力欄が縮めずにはみ出すのを防ぐ */
+            .flex > input, .flex > select, .flex > textarea, .flex-1 {
+                min-width: 0;
+            }
+            /* 見出し＋ボタン群の行、ボタン群を折り返す
+               (折り返さないとボタンが縦書き状態に潰れる / 画面外にはみ出す) */
+            .flex.justify-between, .flex.gap-2, .flex.gap-3, .flex.gap-4 {
+                flex-wrap: wrap;
+            }
+            /* 折り返す行で space-x-* の左マージンがずれるのを打ち消す（間隔は gap で確保） */
+            .flex.flex-wrap[class*="space-x-"] > *,
+            .flex.justify-between[class*="space-x-"] > * {
+                margin-left: 0 !important;
+                margin-right: 0 !important;
+            }
+            .flex.justify-between[class*="space-x-"] {
+                gap: 8px;
+            }
+            /* 列数指定のないグリッド（例: "grid md:grid-cols-2"）が中身に押し広げられるのを防ぐ */
+            .grid:not([class*=" grid-cols-"]):not([class^="grid-cols-"]):not([class*="sm:grid-cols-"]) {
+                grid-template-columns: minmax(0, 1fr);
             }
             
             /* カード: 1カラム */
@@ -418,18 +489,40 @@
                 min-height: 40px;
             }
             
-            /* モーダル: フルスクリーン */
-            .fixed.inset-0 .max-w-2xl,
-            .fixed.inset-0 .max-w-3xl,
-            .fixed.inset-0 .max-w-4xl,
-            .fixed.inset-0 .max-w-6xl {
-                max-width: 100% !important;
-                max-height: 100vh !important;
-                border-radius: 0 !important;
-                margin: 0 !important;
+            /* ===== モーダル ===== */
+            /* 背景（オーバーレイ）: 中身が画面より高い場合はスクロールできるようにする。
+               上寄せ＋子要素の margin:auto で「収まる時は中央・はみ出す時は上端から」表示 */
+            .fixed.inset-0 {
+                padding: calc(8px + env(safe-area-inset-top)) 8px calc(8px + env(safe-area-inset-bottom)) !important;
+                align-items: flex-start !important;
+                overflow-y: auto;
+                -webkit-overflow-scrolling: touch;
+                overscroll-behavior: contain;
             }
             .fixed.inset-0 > div {
-                padding: 4px !important;
+                margin-top: auto !important;
+                margin-bottom: auto !important;
+                max-width: 100% !important;
+            }
+            /* 90vh は iOS Safari ではツールバー分だけ画面からはみ出す → 実際の表示領域 (dvh) を使う */
+            .fixed.inset-0 > .max-h-\[90vh\] {
+                max-height: calc(100vh - 16px - env(safe-area-inset-top) - env(safe-area-inset-bottom)) !important;
+                max-height: calc(100dvh - 16px - env(safe-area-inset-top) - env(safe-area-inset-bottom)) !important;
+            }
+            /* モーダル内の余白をスマホ向けに縮小 */
+            .fixed.inset-0 > .p-8 {
+                padding: 16px !important;
+            }
+            .fixed.inset-0 .p-6 {
+                padding: 14px !important;
+            }
+            .fixed.inset-0 .px-6 {
+                padding-left: 14px !important;
+                padding-right: 14px !important;
+            }
+            .fixed.inset-0 .py-5 {
+                padding-top: 12px !important;
+                padding-bottom: 12px !important;
             }
             
             /* 通知の位置調整 */
@@ -451,17 +544,31 @@
                 box-shadow: 0 0 0 3px #ff6b9d, 0 0 0 6px #feca57, inset 0 0 0 3px rgba(255, 107, 157, 0.3);
             }
             
-            /* グリッド1列化 */
+            /* グリッド1列化
+               (1fr だと中身の最小幅に押し広げられて画面外にはみ出すため minmax(0, 1fr)) */
             .grid-cols-2, .grid-cols-3 {
-                grid-template-columns: 1fr !important;
+                grid-template-columns: minmax(0, 1fr) !important;
             }
-            
+
             /* スクロールバー非表示（タッチデバイス） */
             ::-webkit-scrollbar { width: 0; height: 0; }
-            
-            /* 妖精を非表示（画面が小さいので） */
+
+            /* 妖精: 画面が小さいので縮小して表示
+               (以前は非表示にしていたため「来てもらう」ボタンを押しても何も起きなかった) */
             .fixed.pointer-events-none.z-50 {
-                display: none !important;
+                transform: scale(0.6);
+                transform-origin: top left;
+            }
+        }
+
+        /* --- 幅の狭いスマホ (〜389px: iPhone SE / mini, 多くのAndroid) --- */
+        @media (max-width: 389px) {
+            /* ヘッダーを1行に収めるため🌿アイコンを省略 */
+            header .text-6xl {
+                display: none;
+            }
+            header .flex.items-center.space-x-4 > * + * {
+                margin-left: 0 !important;
             }
         }
 

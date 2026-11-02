@@ -934,7 +934,12 @@
                 }
 
                 @media (max-width: 767px) {
-                    #jivaka-sync-ui { bottom: 8px; left: 8px; }
+                    /* z-index をモーダル(z-50)より下げる: 以前はモーダルの入力欄の上に重なっていた */
+                    #jivaka-sync-ui {
+                        bottom: calc(8px + env(safe-area-inset-bottom));
+                        left: calc(8px + env(safe-area-inset-left));
+                        z-index: 45;
+                    }
                     #sync-badge { padding: 6px 10px; font-size: 0.65rem; }
                     #sync-panel { min-width: 240px; padding: 12px; font-size: 0.75rem; }
                 }
