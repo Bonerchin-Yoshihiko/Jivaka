@@ -18,10 +18,208 @@
     <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
     <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
 
+    <!-- 起動監視: 真っ白な画面のまま止まらないようにする
+         - 起動に失敗したらエラー内容と復旧ボタンを表示
+         - 続けて起動に失敗したら、次回は同期をオフ（セーフモード）にして起動
+         古いSafariでも動くよう、あえて古い書き方（var / function）で書いている -->
+    <script>
+    (function () {
+        'use strict';
+        var BOOT_KEY = 'jivaka-boot-pending'; // 起動が完了しなかった回数
+        var SAFE_KEY = 'jivaka-safe-mode';    // '1' ならセーフモード（同期オフ）
+        var AUTO_SAFE_AFTER = 2;              // 続けて何回失敗したらセーフモードにするか
+        var STABLE_MS = 15000;                // 画面が出てから何ミリ秒落ちなければ起動成功とみなすか
+        var TIMEOUT_MS = 30000;               // これを過ぎても画面が出なければエラー表示
+
+        function lsGet(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
+        function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
+        function lsDel(k) { try { localStorage.removeItem(k); } catch (e) {} }
+
+        // 前回までの起動が完了していなければ（＝途中で落ちた）回数が残っている
+        var failures = parseInt(lsGet(BOOT_KEY) || '0', 10) || 0;
+        var autoSafe = false;
+        if (failures >= AUTO_SAFE_AFTER && lsGet(SAFE_KEY) !== '1') {
+            lsSet(SAFE_KEY, '1');
+            autoSafe = true;
+        }
+        lsSet(BOOT_KEY, String(failures + 1));
+
+        var errors = [];
+        var startedAt = Date.now();
+        var jsErrorSeen = false;
+        function record(msg) {
+            msg = String(msg || '不明なエラー').slice(0, 300);
+            if (errors.indexOf(msg) === -1) errors.push(msg);
+            if (errors.length > 6) errors.shift();
+        }
+        window.addEventListener('error', function (e) {
+            var t = e && e.target;
+            if (t && t !== window && t.tagName) {
+                // 読み込み失敗（フォント等の見た目用ファイルは無視し、スクリプトだけ記録）
+                if (t.tagName === 'SCRIPT') { jsErrorSeen = true; record('読み込めませんでした: ' + (t.src || '(inline)')); }
+                return;
+            }
+            jsErrorSeen = true;
+            record((e.error && e.error.stack ? String(e.error.stack).split('\n').slice(0, 2).join(' / ') : e.message));
+        }, true);
+        window.addEventListener('unhandledrejection', function (e) {
+            var r = e && e.reason;
+            record('Promise: ' + (r && (r.message || r)));
+        });
+
+        function clearCacheAndReload() {
+            var tasks = [];
+            try {
+                if (navigator.serviceWorker && navigator.serviceWorker.getRegistrations) {
+                    tasks.push(navigator.serviceWorker.getRegistrations().then(function (rs) {
+                        return Promise.all(rs.map(function (r) { return r.unregister(); }));
+                    }));
+                }
+                if (window.caches) {
+                    tasks.push(caches.keys().then(function (ks) {
+                        return Promise.all(ks.map(function (k) { return caches.delete(k); }));
+                    }));
+                }
+            } catch (e) {}
+            Promise.all(tasks).catch(function () {}).then(function () {
+                lsDel(BOOT_KEY);
+                location.reload();
+            });
+        }
+
+        window.jivakaBoot = {
+            safeMode: lsGet(SAFE_KEY) === '1',
+            autoSafeMode: autoSafe,
+            errors: errors,
+            exitSafeMode: function () { lsDel(SAFE_KEY); lsDel(BOOT_KEY); location.reload(); },
+            enterSafeMode: function () { lsSet(SAFE_KEY, '1'); lsDel(BOOT_KEY); location.reload(); },
+            clearCacheAndReload: clearCacheAndReload
+        };
+
+        // ---- 起動失敗パネル（Tailwind等が読み込めなくても表示できるようインラインスタイル） ----
+        var panel = null;
+        function btn(label, onClick, primary) {
+            var b = document.createElement('button');
+            b.type = 'button';
+            b.textContent = label;
+            b.style.cssText = 'display:block;width:100%;margin-top:10px;padding:12px;font-size:15px;font-weight:bold;' +
+                'border-radius:8px;cursor:pointer;color:#fff;font-family:inherit;' +
+                (primary ? 'background:#e05080;border:3px solid #feca57;' : 'background:#3d2b5e;border:3px solid #5e2563;');
+            b.onclick = onClick;
+            return b;
+        }
+        function showPanel(reason) {
+            if (panel || !document.body) return;
+            var splash = document.getElementById('pwa-splash');
+            if (splash) splash.style.display = 'none';
+            panel = document.createElement('div');
+            panel.id = 'jivaka-boot-error';
+            panel.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;z-index:2147483000;overflow-y:auto;' +
+                'background:#1a0b2e;color:#fff;font-family:-apple-system,sans-serif;font-size:14px;line-height:1.6;' +
+                'padding:calc(24px + env(safe-area-inset-top)) 20px calc(24px + env(safe-area-inset-bottom));box-sizing:border-box;';
+            var box = document.createElement('div');
+            box.style.cssText = 'max-width:480px;margin:0 auto;';
+            var h = document.createElement('div');
+            h.style.cssText = 'font-size:20px;font-weight:bold;color:#feca57;margin-bottom:8px;';
+            h.textContent = '⚠️ Jīvaka を起動できませんでした';
+            var p = document.createElement('div');
+            p.style.cssText = 'color:#ff9ff3;margin-bottom:12px;';
+            p.textContent = reason;
+            var pre = document.createElement('div');
+            pre.style.cssText = 'background:#000;border:2px solid #5e2563;border-radius:6px;padding:10px;font-family:monospace;' +
+                'font-size:11px;color:#48dbfb;white-space:pre-wrap;word-break:break-all;max-height:40vh;overflow-y:auto;';
+            var ua = (navigator.userAgent.match(/(iPhone|iPad|Android)[^;)]*[;)][^;)]*/) || [navigator.userAgent.slice(0, 80)])[0];
+            pre.textContent = (errors.length ? errors.join('\n\n') : '（エラーの記録なし）') +
+                '\n\n端末: ' + ua + '\nモード: ' + (window.jivakaBoot.safeMode ? 'セーフモード' : '通常') +
+                ' / ホーム画面: ' + (window.navigator.standalone ? 'はい' : 'いいえ');
+            box.appendChild(h);
+            box.appendChild(p);
+            box.appendChild(pre);
+            box.appendChild(btn('🔄 もう一度読み込む', function () { location.reload(); }, true));
+            if (!window.jivakaBoot.safeMode) {
+                box.appendChild(btn('🛟 同期をオフにして起動（セーフモード）', window.jivakaBoot.enterSafeMode));
+            }
+            box.appendChild(btn('🧹 キャッシュを消して読み込み直す（保存データは消えません）', clearCacheAndReload));
+            var note = document.createElement('div');
+            note.style.cssText = 'margin-top:14px;font-size:12px;color:#c8b6e2;';
+            note.textContent = '直らない場合は、この画面のスクリーンショットを送ってください。原因の特定に役立ちます。';
+            box.appendChild(note);
+            panel.appendChild(box);
+            document.body.appendChild(panel);
+        }
+        function hidePanel() {
+            if (panel && panel.parentNode) panel.parentNode.removeChild(panel);
+            panel = null;
+        }
+
+        // セーフモードに自動で切り替えた場合のお知らせ
+        function showAutoSafeNotice() {
+            var n = document.createElement('div');
+            n.style.cssText = 'position:fixed;left:8px;right:8px;top:calc(8px + env(safe-area-inset-top));z-index:2147482000;' +
+                'background:#2d1b4e;border:3px solid #feca57;border-radius:8px;padding:12px;color:#fff;font-size:13px;' +
+                'line-height:1.5;box-shadow:4px 4px 0 rgba(0,0,0,.5);font-family:-apple-system,sans-serif;';
+            n.textContent = '🛟 前回うまく起動できなかったため、PCとの同期をオフ（セーフモード）にして起動しました。' +
+                '左下の「セーフモード」から同期をオンに戻せます。';
+            var ok = document.createElement('button');
+            ok.type = 'button';
+            ok.textContent = 'OK';
+            ok.style.cssText = 'display:block;margin:8px 0 0 auto;padding:6px 16px;background:none;border:2px solid #feca57;' +
+                'color:#feca57;font-weight:bold;border-radius:4px;';
+            ok.onclick = function () { n.parentNode && n.parentNode.removeChild(n); };
+            n.appendChild(ok);
+            document.body.appendChild(n);
+        }
+
+        var mountedAt = 0;
+        var succeeded = false;
+        var noticeShown = false;
+
+        // 画面を離れた（ホームに戻る・アプリ切替・再読み込み）とき:
+        // 強制終了（メモリ不足など）ではこのイベントは発生しないので、ここに来たら「落ちてはいない」
+        function onLeave() {
+            if (succeeded) return;
+            if (mountedAt) {
+                succeeded = true;
+                lsDel(BOOT_KEY); // 表示されてから普通に閉じた → 起動成功
+            } else if (!panel) {
+                lsSet(BOOT_KEY, String(failures)); // 表示前に閉じただけ → 失敗に数えない
+            }
+        }
+        document.addEventListener('visibilitychange', function () {
+            if (document.visibilityState === 'hidden') onLeave();
+        });
+        window.addEventListener('pagehide', onLeave);
+        var timer = setInterval(function () {
+            var root = document.getElementById('root');
+            var mounted = !!(root && root.children.length);
+            var now = Date.now();
+            if (mounted) {
+                hidePanel();
+                if (!mountedAt) mountedAt = now;
+                if (autoSafe && !noticeShown) { noticeShown = true; showAutoSafeNotice(); }
+                if (!succeeded && now - mountedAt >= STABLE_MS) {
+                    succeeded = true;
+                    lsDel(BOOT_KEY); // 起動成功: 失敗回数をリセット
+                }
+            } else if (mountedAt) {
+                // 一度表示された画面が消えた = 描画中のエラーで画面全体が破棄された
+                showPanel('画面の表示中にエラーが発生しました。');
+                clearInterval(timer);
+            } else if (now - startedAt > TIMEOUT_MS) {
+                showPanel('読み込みに時間がかかりすぎています（通信状況が悪いか、途中でエラーが起きています）。');
+            } else if (jsErrorSeen && now - startedAt > 15000) {
+                showPanel('読み込み中にエラーが発生しました。');
+            }
+        }, 1000);
+    })();
+    </script>
+
     <!-- Dependencies -->
     <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <!-- Babel はバージョンを固定する: 無指定だと 2026年6月から Babel 8 が配信され、
+         Babel 8 は iOS 15.3 以前の Safari では読み込み時にエラーになる -->
+    <script src="https://unpkg.com/@babel/standalone@7.29.12/babel.min.js"></script>
     <script src="https://cdn.tailwindcss.com"></script>
 
     <!-- 8bit/ピクセルフォント -->
