@@ -18,10 +18,208 @@
     <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
     <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
 
+    <!-- 起動監視: 真っ白な画面のまま止まらないようにする
+         - 起動に失敗したらエラー内容と復旧ボタンを表示
+         - 続けて起動に失敗したら、次回は同期をオフ（セーフモード）にして起動
+         古いSafariでも動くよう、あえて古い書き方（var / function）で書いている -->
+    <script>
+    (function () {
+        'use strict';
+        var BOOT_KEY = 'jivaka-boot-pending'; // 起動が完了しなかった回数
+        var SAFE_KEY = 'jivaka-safe-mode';    // '1' ならセーフモード（同期オフ）
+        var AUTO_SAFE_AFTER = 2;              // 続けて何回失敗したらセーフモードにするか
+        var STABLE_MS = 15000;                // 画面が出てから何ミリ秒落ちなければ起動成功とみなすか
+        var TIMEOUT_MS = 30000;               // これを過ぎても画面が出なければエラー表示
+
+        function lsGet(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
+        function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
+        function lsDel(k) { try { localStorage.removeItem(k); } catch (e) {} }
+
+        // 前回までの起動が完了していなければ（＝途中で落ちた）回数が残っている
+        var failures = parseInt(lsGet(BOOT_KEY) || '0', 10) || 0;
+        var autoSafe = false;
+        if (failures >= AUTO_SAFE_AFTER && lsGet(SAFE_KEY) !== '1') {
+            lsSet(SAFE_KEY, '1');
+            autoSafe = true;
+        }
+        lsSet(BOOT_KEY, String(failures + 1));
+
+        var errors = [];
+        var startedAt = Date.now();
+        var jsErrorSeen = false;
+        function record(msg) {
+            msg = String(msg || '不明なエラー').slice(0, 300);
+            if (errors.indexOf(msg) === -1) errors.push(msg);
+            if (errors.length > 6) errors.shift();
+        }
+        window.addEventListener('error', function (e) {
+            var t = e && e.target;
+            if (t && t !== window && t.tagName) {
+                // 読み込み失敗（フォント等の見た目用ファイルは無視し、スクリプトだけ記録）
+                if (t.tagName === 'SCRIPT') { jsErrorSeen = true; record('読み込めませんでした: ' + (t.src || '(inline)')); }
+                return;
+            }
+            jsErrorSeen = true;
+            record((e.error && e.error.stack ? String(e.error.stack).split('\n').slice(0, 2).join(' / ') : e.message));
+        }, true);
+        window.addEventListener('unhandledrejection', function (e) {
+            var r = e && e.reason;
+            record('Promise: ' + (r && (r.message || r)));
+        });
+
+        function clearCacheAndReload() {
+            var tasks = [];
+            try {
+                if (navigator.serviceWorker && navigator.serviceWorker.getRegistrations) {
+                    tasks.push(navigator.serviceWorker.getRegistrations().then(function (rs) {
+                        return Promise.all(rs.map(function (r) { return r.unregister(); }));
+                    }));
+                }
+                if (window.caches) {
+                    tasks.push(caches.keys().then(function (ks) {
+                        return Promise.all(ks.map(function (k) { return caches.delete(k); }));
+                    }));
+                }
+            } catch (e) {}
+            Promise.all(tasks).catch(function () {}).then(function () {
+                lsDel(BOOT_KEY);
+                location.reload();
+            });
+        }
+
+        window.jivakaBoot = {
+            safeMode: lsGet(SAFE_KEY) === '1',
+            autoSafeMode: autoSafe,
+            errors: errors,
+            exitSafeMode: function () { lsDel(SAFE_KEY); lsDel(BOOT_KEY); location.reload(); },
+            enterSafeMode: function () { lsSet(SAFE_KEY, '1'); lsDel(BOOT_KEY); location.reload(); },
+            clearCacheAndReload: clearCacheAndReload
+        };
+
+        // ---- 起動失敗パネル（Tailwind等が読み込めなくても表示できるようインラインスタイル） ----
+        var panel = null;
+        function btn(label, onClick, primary) {
+            var b = document.createElement('button');
+            b.type = 'button';
+            b.textContent = label;
+            b.style.cssText = 'display:block;width:100%;margin-top:10px;padding:12px;font-size:15px;font-weight:bold;' +
+                'border-radius:8px;cursor:pointer;color:#fff;font-family:inherit;' +
+                (primary ? 'background:#e05080;border:3px solid #feca57;' : 'background:#3d2b5e;border:3px solid #5e2563;');
+            b.onclick = onClick;
+            return b;
+        }
+        function showPanel(reason) {
+            if (panel || !document.body) return;
+            var splash = document.getElementById('pwa-splash');
+            if (splash) splash.style.display = 'none';
+            panel = document.createElement('div');
+            panel.id = 'jivaka-boot-error';
+            panel.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;z-index:2147483000;overflow-y:auto;' +
+                'background:#1a0b2e;color:#fff;font-family:-apple-system,sans-serif;font-size:14px;line-height:1.6;' +
+                'padding:calc(24px + env(safe-area-inset-top)) 20px calc(24px + env(safe-area-inset-bottom));box-sizing:border-box;';
+            var box = document.createElement('div');
+            box.style.cssText = 'max-width:480px;margin:0 auto;';
+            var h = document.createElement('div');
+            h.style.cssText = 'font-size:20px;font-weight:bold;color:#feca57;margin-bottom:8px;';
+            h.textContent = '⚠️ Jīvaka を起動できませんでした';
+            var p = document.createElement('div');
+            p.style.cssText = 'color:#ff9ff3;margin-bottom:12px;';
+            p.textContent = reason;
+            var pre = document.createElement('div');
+            pre.style.cssText = 'background:#000;border:2px solid #5e2563;border-radius:6px;padding:10px;font-family:monospace;' +
+                'font-size:11px;color:#48dbfb;white-space:pre-wrap;word-break:break-all;max-height:40vh;overflow-y:auto;';
+            var ua = (navigator.userAgent.match(/(iPhone|iPad|Android)[^;)]*[;)][^;)]*/) || [navigator.userAgent.slice(0, 80)])[0];
+            pre.textContent = (errors.length ? errors.join('\n\n') : '（エラーの記録なし）') +
+                '\n\n端末: ' + ua + '\nモード: ' + (window.jivakaBoot.safeMode ? 'セーフモード' : '通常') +
+                ' / ホーム画面: ' + (window.navigator.standalone ? 'はい' : 'いいえ');
+            box.appendChild(h);
+            box.appendChild(p);
+            box.appendChild(pre);
+            box.appendChild(btn('🔄 もう一度読み込む', function () { location.reload(); }, true));
+            if (!window.jivakaBoot.safeMode) {
+                box.appendChild(btn('🛟 同期をオフにして起動（セーフモード）', window.jivakaBoot.enterSafeMode));
+            }
+            box.appendChild(btn('🧹 キャッシュを消して読み込み直す（保存データは消えません）', clearCacheAndReload));
+            var note = document.createElement('div');
+            note.style.cssText = 'margin-top:14px;font-size:12px;color:#c8b6e2;';
+            note.textContent = '直らない場合は、この画面のスクリーンショットを送ってください。原因の特定に役立ちます。';
+            box.appendChild(note);
+            panel.appendChild(box);
+            document.body.appendChild(panel);
+        }
+        function hidePanel() {
+            if (panel && panel.parentNode) panel.parentNode.removeChild(panel);
+            panel = null;
+        }
+
+        // セーフモードに自動で切り替えた場合のお知らせ
+        function showAutoSafeNotice() {
+            var n = document.createElement('div');
+            n.style.cssText = 'position:fixed;left:8px;right:8px;top:calc(8px + env(safe-area-inset-top));z-index:2147482000;' +
+                'background:#2d1b4e;border:3px solid #feca57;border-radius:8px;padding:12px;color:#fff;font-size:13px;' +
+                'line-height:1.5;box-shadow:4px 4px 0 rgba(0,0,0,.5);font-family:-apple-system,sans-serif;';
+            n.textContent = '🛟 前回うまく起動できなかったため、PCとの同期をオフ（セーフモード）にして起動しました。' +
+                '左下の「セーフモード」から同期をオンに戻せます。';
+            var ok = document.createElement('button');
+            ok.type = 'button';
+            ok.textContent = 'OK';
+            ok.style.cssText = 'display:block;margin:8px 0 0 auto;padding:6px 16px;background:none;border:2px solid #feca57;' +
+                'color:#feca57;font-weight:bold;border-radius:4px;';
+            ok.onclick = function () { n.parentNode && n.parentNode.removeChild(n); };
+            n.appendChild(ok);
+            document.body.appendChild(n);
+        }
+
+        var mountedAt = 0;
+        var succeeded = false;
+        var noticeShown = false;
+
+        // 画面を離れた（ホームに戻る・アプリ切替・再読み込み）とき:
+        // 強制終了（メモリ不足など）ではこのイベントは発生しないので、ここに来たら「落ちてはいない」
+        function onLeave() {
+            if (succeeded) return;
+            if (mountedAt) {
+                succeeded = true;
+                lsDel(BOOT_KEY); // 表示されてから普通に閉じた → 起動成功
+            } else if (!panel) {
+                lsSet(BOOT_KEY, String(failures)); // 表示前に閉じただけ → 失敗に数えない
+            }
+        }
+        document.addEventListener('visibilitychange', function () {
+            if (document.visibilityState === 'hidden') onLeave();
+        });
+        window.addEventListener('pagehide', onLeave);
+        var timer = setInterval(function () {
+            var root = document.getElementById('root');
+            var mounted = !!(root && root.children.length);
+            var now = Date.now();
+            if (mounted) {
+                hidePanel();
+                if (!mountedAt) mountedAt = now;
+                if (autoSafe && !noticeShown) { noticeShown = true; showAutoSafeNotice(); }
+                if (!succeeded && now - mountedAt >= STABLE_MS) {
+                    succeeded = true;
+                    lsDel(BOOT_KEY); // 起動成功: 失敗回数をリセット
+                }
+            } else if (mountedAt) {
+                // 一度表示された画面が消えた = 描画中のエラーで画面全体が破棄された
+                showPanel('画面の表示中にエラーが発生しました。');
+                clearInterval(timer);
+            } else if (now - startedAt > TIMEOUT_MS) {
+                showPanel('読み込みに時間がかかりすぎています（通信状況が悪いか、途中でエラーが起きています）。');
+            } else if (jsErrorSeen && now - startedAt > 15000) {
+                showPanel('読み込み中にエラーが発生しました。');
+            }
+        }, 1000);
+    })();
+    </script>
+
     <!-- Dependencies -->
     <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <!-- Babel はバージョンを固定する: 無指定だと 2026年6月から Babel 8 が配信され、
+         Babel 8 は iOS 15.3 以前の Safari では読み込み時にエラーになる -->
+    <script src="https://unpkg.com/@babel/standalone@7.29.12/babel.min.js"></script>
     <script src="https://cdn.tailwindcss.com"></script>
 
     <!-- 8bit/ピクセルフォント -->
@@ -315,37 +513,69 @@
         }
         @keyframes coin-shine { 0%, 100% { opacity: 1; } 50% { opacity: 0.8; } }
 
+        /* モーダル背景: 親の space-y-* が付ける margin-top で上端がずれ、
+           ヘッダーがモーダルの上に見えてしまう（押せてしまう）のを防ぐ */
+        .fixed.inset-0 {
+            margin: 0 !important;
+        }
+        /* モーダル内の固定見出し（✕ボタン付き）を、スクロールした中身より手前に表示する */
+        .fixed.inset-0 .sticky.top-0 {
+            z-index: 10;
+        }
+
         /* =========================================
            📱 MOBILE RESPONSIVE STYLES
            ========================================= */
 
         /* --- スマートフォン (〜767px) --- */
         @media (max-width: 767px) {
-            /* ヘッダーをコンパクトに */
+            /* 横方向のはみ出しをページ全体のスクロールにしない
+               (clip はスクロールコンテナを作らないので sticky を壊さない) */
+            #root {
+                overflow-x: clip;
+            }
+
+            /* ===== ヘッダー: 1行に収まるようコンパクト化（入りきらない端末では2行に折り返し） ===== */
             header .max-w-7xl {
                 padding: 8px 12px !important;
             }
-            
-            /* タイトル縮小 */
-            header h1 {
-                font-size: 1.5rem !important;
+            header .max-w-7xl > .flex {
+                flex-wrap: wrap;
+                row-gap: 6px;
+                column-gap: 8px;
+            }
+            header .flex.items-center.space-x-4 > * + * {
+                margin-left: 6px !important;
             }
             header .text-6xl {
-                font-size: 2rem !important;
+                font-size: 1.6rem !important;
+                line-height: 1 !important;
+            }
+            header h1 {
+                font-size: 1.35rem !important;
+                line-height: 1.2 !important;
+                letter-spacing: 1px;
             }
             header p {
-                font-size: 0.6rem !important;
                 display: none;
             }
-            
+
             /* ヘッダーボタン: アイコンのみ表示 */
             header .flex.items-center.space-x-3 {
-                gap: 4px !important;
+                margin-left: auto;
+                gap: 4px;
+                flex-wrap: wrap;
+                justify-content: flex-end;
+            }
+            header .flex.items-center.space-x-3 > * {
+                margin: 0 !important;
             }
             header .flex.items-center.space-x-3 > button {
-                padding: 8px !important;
-                min-width: 40px;
-                min-height: 40px;
+                padding: 0 !important;
+                width: 36px;
+                height: 36px;
+                min-height: 36px;
+                border-width: 3px;
                 display: flex;
                 align-items: center;
                 justify-content: center;
@@ -354,47 +584,86 @@
                 display: none !important;
             }
             header .flex.items-center.space-x-3 > button > span.text-2xl {
-                font-size: 1.2rem !important;
+                font-size: 1.1rem !important;
             }
-            
-            /* タブナビゲーション: 横スクロール対応 */
-            nav .flex.space-x-2 {
-                overflow-x: auto;
-                -webkit-overflow-scrolling: touch;
-                scrollbar-width: none;
-                gap: 2px !important;
-                padding-bottom: 4px;
+
+            /* ヘッダーは一緒にスクロールさせ、タブだけ画面上部に固定する
+               (ヘッダー＋タブ両方を固定すると画面の1/4以上が埋まり、重なりも起きるため) */
+            header.sticky {
+                position: relative !important;
             }
-            nav .flex.space-x-2::-webkit-scrollbar {
-                display: none;
-            }
-            
-            /* タブのstickyオフセット調整 */
             nav.sticky {
-                top: 56px !important;
+                position: -webkit-sticky !important;
+                position: sticky !important;
+                top: 0 !important;
             }
-            
-            /* タブボタンを小さく */
+
+            /* ===== タブ: 4つとも画面内に収める（アイコン上・ラベル下） ===== */
+            nav .max-w-7xl {
+                padding: 6px 4px 0 !important;
+            }
+            nav .flex.space-x-2 {
+                gap: 4px;
+            }
+            nav .flex.space-x-2 > * {
+                margin: 0 !important;
+            }
             .tab-button {
-                padding: 8px 10px !important;
-                font-size: 0.7rem !important;
+                flex: 1 1 auto;
+                min-width: 0;
+                flex-direction: column;
+                justify-content: center;
+                gap: 2px;
+                padding: 6px 4px !important;
+                border-width: 3px;
                 white-space: nowrap;
-                flex-shrink: 0;
             }
-            .tab-button .space-x-2 {
-                gap: 2px !important;
+            .tab-button > * {
+                margin: 0 !important;
             }
             .tab-button svg {
-                width: 14px !important;
-                height: 14px !important;
+                width: 16px !important;
+                height: 16px !important;
+                flex-shrink: 0;
             }
             .tab-button span {
-                font-size: 0.65rem !important;
+                font-size: 0.68rem !important;
+                max-width: 100%;
+                overflow: hidden;
+                text-overflow: ellipsis;
             }
-            
-            /* メインコンテンツ */
+
+            /* メインコンテンツ（下部は同期バッジに隠れないよう余白を確保） */
             main.max-w-7xl {
-                padding: 8px !important;
+                padding: 8px 8px calc(72px + env(safe-area-inset-bottom)) !important;
+            }
+
+            /* ===== はみ出し防止（汎用） ===== */
+            /* 長い英単語・URL を折り返す */
+            main, .fixed.inset-0 {
+                overflow-wrap: anywhere;
+            }
+            /* フレックス内の入力欄が縮めずにはみ出すのを防ぐ */
+            .flex > input, .flex > select, .flex > textarea, .flex-1 {
+                min-width: 0;
+            }
+            /* 見出し＋ボタン群の行、ボタン群を折り返す
+               (折り返さないとボタンが縦書き状態に潰れる / 画面外にはみ出す) */
+            .flex.justify-between, .flex.gap-2, .flex.gap-3, .flex.gap-4 {
+                flex-wrap: wrap;
+            }
+            /* 折り返す行で space-x-* の左マージンがずれるのを打ち消す（間隔は gap で確保） */
+            .flex.flex-wrap[class*="space-x-"] > *,
+            .flex.justify-between[class*="space-x-"] > * {
+                margin-left: 0 !important;
+                margin-right: 0 !important;
+            }
+            .flex.justify-between[class*="space-x-"] {
+                gap: 8px;
+            }
+            /* 列数指定のないグリッド（例: "grid md:grid-cols-2"）が中身に押し広げられるのを防ぐ */
+            .grid:not([class*=" grid-cols-"]):not([class^="grid-cols-"]):not([class*="sm:grid-cols-"]) {
+                grid-template-columns: minmax(0, 1fr);
             }
             
             /* カード: 1カラム */
@@ -418,18 +687,40 @@
                 min-height: 40px;
             }
             
-            /* モーダル: フルスクリーン */
-            .fixed.inset-0 .max-w-2xl,
-            .fixed.inset-0 .max-w-3xl,
-            .fixed.inset-0 .max-w-4xl,
-            .fixed.inset-0 .max-w-6xl {
-                max-width: 100% !important;
-                max-height: 100vh !important;
-                border-radius: 0 !important;
-                margin: 0 !important;
+            /* ===== モーダル ===== */
+            /* 背景（オーバーレイ）: 中身が画面より高い場合はスクロールできるようにする。
+               上寄せ＋子要素の margin:auto で「収まる時は中央・はみ出す時は上端から」表示 */
+            .fixed.inset-0 {
+                padding: calc(8px + env(safe-area-inset-top)) 8px calc(8px + env(safe-area-inset-bottom)) !important;
+                align-items: flex-start !important;
+                overflow-y: auto;
+                -webkit-overflow-scrolling: touch;
+                overscroll-behavior: contain;
             }
             .fixed.inset-0 > div {
-                padding: 4px !important;
+                margin-top: auto !important;
+                margin-bottom: auto !important;
+                max-width: 100% !important;
+            }
+            /* 90vh は iOS Safari ではツールバー分だけ画面からはみ出す → 実際の表示領域 (dvh) を使う */
+            .fixed.inset-0 > .max-h-\[90vh\] {
+                max-height: calc(100vh - 16px - env(safe-area-inset-top) - env(safe-area-inset-bottom)) !important;
+                max-height: calc(100dvh - 16px - env(safe-area-inset-top) - env(safe-area-inset-bottom)) !important;
+            }
+            /* モーダル内の余白をスマホ向けに縮小 */
+            .fixed.inset-0 > .p-8 {
+                padding: 16px !important;
+            }
+            .fixed.inset-0 .p-6 {
+                padding: 14px !important;
+            }
+            .fixed.inset-0 .px-6 {
+                padding-left: 14px !important;
+                padding-right: 14px !important;
+            }
+            .fixed.inset-0 .py-5 {
+                padding-top: 12px !important;
+                padding-bottom: 12px !important;
             }
             
             /* 通知の位置調整 */
@@ -451,17 +742,31 @@
                 box-shadow: 0 0 0 3px #ff6b9d, 0 0 0 6px #feca57, inset 0 0 0 3px rgba(255, 107, 157, 0.3);
             }
             
-            /* グリッド1列化 */
+            /* グリッド1列化
+               (1fr だと中身の最小幅に押し広げられて画面外にはみ出すため minmax(0, 1fr)) */
             .grid-cols-2, .grid-cols-3 {
-                grid-template-columns: 1fr !important;
+                grid-template-columns: minmax(0, 1fr) !important;
             }
-            
+
             /* スクロールバー非表示（タッチデバイス） */
             ::-webkit-scrollbar { width: 0; height: 0; }
-            
-            /* 妖精を非表示（画面が小さいので） */
+
+            /* 妖精: 画面が小さいので縮小して表示
+               (以前は非表示にしていたため「来てもらう」ボタンを押しても何も起きなかった) */
             .fixed.pointer-events-none.z-50 {
-                display: none !important;
+                transform: scale(0.6);
+                transform-origin: top left;
+            }
+        }
+
+        /* --- 幅の狭いスマホ (〜389px: iPhone SE / mini, 多くのAndroid) --- */
+        @media (max-width: 389px) {
+            /* ヘッダーを1行に収めるため🌿アイコンを省略 */
+            header .text-6xl {
+                display: none;
+            }
+            header .flex.items-center.space-x-4 > * + * {
+                margin-left: 0 !important;
             }
         }
 

@@ -110,6 +110,11 @@
 
     const SYNC_TIMEOUT = 30000; // 30秒
 
+    /** セーフモード（同期オフで起動）中か。フラグは index.html の起動監視 (window.jivakaBoot) が管理する */
+    function isSafeMode() {
+        return !!(window.jivakaBoot && window.jivakaBoot.safeMode);
+    }
+
     // Firebase参照（SDKロード後に初期化）
     let db = null;   // Firestore
     let auth = null; // Firebase Auth
@@ -118,6 +123,13 @@
      * Firebase初期化
      */
     function initFirebase() {
+        // セーフモード（起動に続けて失敗したとき index.html の起動監視が有効にする）:
+        // 同期処理が原因で起動できない場合に備え、Firebase を一切初期化しない
+        if (isSafeMode()) {
+            console.warn('[Firebase] Safe mode - sync disabled');
+            updateSyncUI('safe-mode');
+            return false;
+        }
         if (typeof firebase === 'undefined') {
             console.warn('[Firebase] SDK not loaded');
             return false;
@@ -204,6 +216,12 @@
     // =====================================================
 
     async function signInWithGoogle() {
+        if (isSafeMode()) {
+            if (confirm('セーフモード中は同期がオフになっています。\n同期をオンにして再起動しますか？')) {
+                window.jivakaBoot.exitSafeMode();
+            }
+            return;
+        }
         if (!auth) return;
         try {
             const provider = new firebase.auth.GoogleAuthProvider();
@@ -238,7 +256,13 @@
         return db.collection('users').doc(syncState.userId).collection('data').doc(key);
     }
 
-    async function cloudGet(key) {
+    /**
+     * @param {string} key
+     * @param {{withImages?: boolean}} [options]
+     *   withImages=false: herbs の画像サブコレクションを取得しない
+     *   (件数・更新日時の比較だけなら画像は不要。全画像の取得はメモリと通信量が大きい)
+     */
+    async function cloudGet(key, { withImages = true } = {}) {
         const ref = getUserDocRef(key);
         if (!ref) return null;
         // ネットワークエラーをthrowする（nullを返すと「データ無し」と区別できず
@@ -246,23 +270,27 @@
         const doc = await ref.get();
         if (!doc.exists) return null;
         const data = doc.data();
+        return withImages ? attachCloudImages(key, data) : data;
+    }
 
-        // herbs の場合は images サブコレクションから画像をマージして返す
-        if (shouldSplitImages(key) && Array.isArray(data.value)) {
-            try {
-                const imagesSnap = await ref.collection('images').get();
-                const imageMap = {};
-                imagesSnap.forEach(d => {
-                    const img = d.data();
-                    if (img && img.image) imageMap[d.id] = img.image;
-                });
-                return { ...data, value: mergeHerbImages(data.value, imageMap) };
-            } catch (e) {
-                console.warn('[Cloud] Failed to fetch herb images:', e);
-                return data; // メインだけでも返す (旧フォーマット互換)
-            }
+    /**
+     * herbs の場合は images サブコレクションから画像を取得してマージした data を返す
+     * (それ以外のキーはそのまま返す)
+     */
+    async function attachCloudImages(key, data) {
+        if (!data || !shouldSplitImages(key) || !Array.isArray(data.value)) return data;
+        try {
+            const imagesSnap = await getUserDocRef(key).collection('images').get();
+            const imageMap = {};
+            imagesSnap.forEach(d => {
+                const img = d.data();
+                if (img && img.image) imageMap[d.id] = img.image;
+            });
+            return { ...data, value: mergeHerbImages(data.value, imageMap) };
+        } catch (e) {
+            console.warn('[Cloud] Failed to fetch herb images:', e);
+            return data; // メインだけでも返す (旧フォーマット互換)
         }
-        return data;
     }
 
     async function cloudSet(key, value) {
@@ -425,13 +453,22 @@
         }
         syncState.isSyncing = true;
         console.log('[Sync] Starting initial sync...');
-        
-        // 同期でローカルが上書きされる前にスナップショットを保存
-        await createBackupSnapshot('同期開始前の自動バックアップ');
+
+        // 同期でローカルが上書きされる前にスナップショットを保存する。
+        // 以前は起動のたびに（何も上書きしない場合でも）全データ＋全画像のバックアップを
+        // 作っていて、データが多いとiPhoneでメモリ不足になり得たため、
+        // 実際にローカルを上書きする直前に1回だけ作るようにした。
+        let backupDone = false;
+        const backupBeforeOverwrite = async () => {
+            if (backupDone) return;
+            backupDone = true;
+            await createBackupSnapshot('同期開始前の自動バックアップ');
+        };
 
         for (const key of SYNCABLE_KEYS) {
             try {
-                const cloudData = await cloudGet(key);
+                // 比較には件数と更新日時しか使わないので、画像はクラウド側を採用する時だけ取得する
+                const cloudData = await cloudGet(key, { withImages: false });
                 const localData = await localGet(key, null);
 
                 const cloudHasData = cloudData && cloudData.value !== undefined && cloudData.value !== null;
@@ -440,7 +477,8 @@
 
                 if (cloudHasData && !localHasData) {
                     // クラウドのみ → ローカルへ
-                    await localSet(key, cloudData.value);
+                    await backupBeforeOverwrite();
+                    await localSet(key, (await attachCloudImages(key, cloudData)).value);
                     const cloudTs = cloudData.updatedAtMs || (cloudData.updatedAt ? cloudData.updatedAt.toMillis() : 0);
                     await localSet('_ts_' + key, { ts: cloudTs });
                     console.log(`[Sync] ← Cloud → Local: ${key}`);
@@ -483,7 +521,8 @@
 
                     if (winner === 'cloud') {
                         // クラウドを採用 → ローカルを上書き
-                        await localSet(key, cloudData.value);
+                        await backupBeforeOverwrite();
+                        await localSet(key, (await attachCloudImages(key, cloudData)).value);
                         await localSet('_ts_' + key, { ts: cloudTs });
                         console.log(`[Sync] Cloud → Local: ${key} (${reason})`);
                     } else if (winner === 'local') {
@@ -507,14 +546,22 @@
     /**
      * リアルタイムリスナー: Firestoreの変更を検知してローカルに反映
      */
-    let _remoteBackupTimer = null;  // リモート変更バックアップのデバウンス
+    // リモート変更受信前のバックアップ: 複数キーが続けて変わっても10秒に1回だけ作成
+    let _lastRemoteBackupAt = 0;
+    let _remoteBackupPromise = Promise.resolve();
+    function backupBeforeRemoteChange() {
+        if (Date.now() - _lastRemoteBackupAt > 10000) {
+            _lastRemoteBackupAt = Date.now();
+            _remoteBackupPromise = createBackupSnapshot('リモート変更受信前の自動バックアップ');
+        }
+        return _remoteBackupPromise;
+    }
 
     function startRealtimeListeners() {
         if (!db || !syncState.userId) return;
         stopRealtimeListeners();
 
         const deviceId = getDeviceId();
-        let remoteBackupPending = false;
 
         for (const key of SYNCABLE_KEYS) {
             const ref = getUserDocRef(key);
@@ -523,39 +570,25 @@
             const unsubscribe = ref.onSnapshot(async (doc) => {
                 if (!doc.exists) return;
                 const data = doc.data();
-                
+
                 // 自分のデバイスからの変更は無視（ループ防止）
                 if (data.deviceId === deviceId) return;
 
+                // ローカルが既にこの版（またはより新しい版）なら何もしない。
+                // リスナー開始直後は全キーの「現在の状態」が届くため、以前は起動のたびに
+                // 初期同期で揃えたばかりのデータ（herbs は全画像）を再取得・再保存していた。
+                const cloudTs = data.updatedAtMs || (data.updatedAt ? data.updatedAt.toMillis() : Date.now());
+                const localMeta = await localGet('_ts_' + key, null);
+                if (localMeta && localMeta.ts && cloudTs <= localMeta.ts) return;
+
                 console.log(`[Sync] Remote change detected: ${key}`);
 
-                // デバウンスされたバックアップ: 複数キーの連続変更で1回だけ作成
-                if (!remoteBackupPending) {
-                    remoteBackupPending = true;
-                    clearTimeout(_remoteBackupTimer);
-                    _remoteBackupTimer = setTimeout(() => {
-                        createBackupSnapshot('リモート変更受信前の自動バックアップ');
-                        remoteBackupPending = false;
-                    }, 500);
-                }
-
                 // herbs の場合は images サブコレクションから画像を取得してマージ
-                let value = data.value;
-                if (shouldSplitImages(key) && Array.isArray(value)) {
-                    try {
-                        const imagesSnap = await ref.collection('images').get();
-                        const imageMap = {};
-                        imagesSnap.forEach(d => {
-                            const img = d.data();
-                            if (img && img.image) imageMap[d.id] = img.image;
-                        });
-                        value = mergeHerbImages(value, imageMap);
-                    } catch (e) {
-                        console.warn('[Sync] Failed to fetch images in listener:', e);
-                    }
-                }
+                const value = (await attachCloudImages(key, data)).value;
 
-                const cloudTs = data.updatedAtMs || (data.updatedAt ? data.updatedAt.toMillis() : Date.now());
+                // 上書きする「前」にバックアップを取る（以前は500ms後に取っていたため上書き後の状態になっていた）
+                await backupBeforeRemoteChange();
+
                 localSet(key, value).then(() => {
                     localSet('_ts_' + key, { ts: cloudTs });
                     // UIリフレッシュイベントを発火
@@ -730,7 +763,9 @@
                 const data = await localGet(key, null);
                 if (data !== null && data !== undefined &&
                     !(Array.isArray(data) && data.length === 0)) {
-                    snapshot[key] = JSON.parse(JSON.stringify(data));
+                    // localGet は毎回 IndexedDB から新しいコピーを返すので、そのまま使う
+                    // (JSON 経由の複製は画像入りだと巨大な文字列を作りメモリを圧迫するため廃止)
+                    snapshot[key] = data;
                 }
             }
             // 中身が空ならバックアップ不要
@@ -934,7 +969,12 @@
                 }
 
                 @media (max-width: 767px) {
-                    #jivaka-sync-ui { bottom: 8px; left: 8px; }
+                    /* z-index をモーダル(z-50)より下げる: 以前はモーダルの入力欄の上に重なっていた */
+                    #jivaka-sync-ui {
+                        bottom: calc(8px + env(safe-area-inset-bottom));
+                        left: calc(8px + env(safe-area-inset-left));
+                        z-index: 45;
+                    }
                     #sync-badge { padding: 6px 10px; font-size: 0.65rem; }
                     #sync-panel { min-width: 240px; padding: 12px; font-size: 0.75rem; }
                 }
@@ -969,6 +1009,22 @@
     function renderSyncPanel() {
         const content = document.getElementById('sync-panel-content');
         if (!content) return;
+
+        if (isSafeMode()) {
+            content.innerHTML = `
+                <div class="sync-info">
+                    🛟 <span>セーフモード</span>で起動中です。<br>
+                    続けてうまく起動できなかったため、<br>
+                    PC との同期をオフにしています。<br><br>
+                    データはこの端末に保存されたものを表示しています。
+                    同期をオフにしている間の変更はPCに送られません。
+                </div>
+                <button class="sync-btn" onclick="window.jivakaBoot.exitSafeMode()">
+                    🔄 同期をオンにして再起動
+                </button>
+            `;
+            return;
+        }
 
         if (!auth || typeof FIREBASE_CONFIG === 'undefined' || FIREBASE_CONFIG.apiKey === 'YOUR_API_KEY_HERE') {
             content.innerHTML = `
@@ -1044,7 +1100,8 @@
             'offline':    { cls: 'offline',    text: 'オフライン' },
             'error':      { cls: 'error',      text: '同期エラー' },
             'signed-out': { cls: 'signed-out', text: 'ローカルモード' },
-            'local-only': { cls: 'local-only', text: 'ローカル専用' }
+            'local-only': { cls: 'local-only', text: 'ローカル専用' },
+            'safe-mode':  { cls: 'error',      text: 'セーフモード（同期オフ）' }
         };
 
         const s = statusMap[status] || statusMap['signed-out'];
@@ -1289,7 +1346,7 @@
         },
         isSignedIn: () => !!syncState.userId,
         getStatus: () => {
-            if (!window.jivakaSync.isAvailable()) return 'local-only';
+            if (!window.jivakaSync.isAvailable() || isSafeMode()) return 'local-only';
             if (!syncState.userId) return 'signed-out';
             if (syncState.error) return 'error';
             if (!syncState.isOnline) return 'offline';
